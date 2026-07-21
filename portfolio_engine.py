@@ -718,6 +718,19 @@ def regime_stats(regime_df, periods_per_year=12):
 #    Ported from edhec_risk_kit.py; the building blocks for a pension / LDI tool.
 # ============================================================
 
+def _to_scalar(x):
+    """
+    Coerce a length-1 Series / ndarray / scalar to a Python float.
+    pandas 3.0 made float(length-1 Series) a hard TypeError (was a warning in 2.x),
+    so we extract the element explicitly for cross-version safety.
+    """
+    if isinstance(x, (pd.Series, pd.DataFrame)):
+        return float(np.asarray(x).ravel()[0])
+    if isinstance(x, np.ndarray):
+        return float(x.ravel()[0])
+    return float(x)
+
+
 def discount(t, r):
     """
     Price today of $1 paid at time t, given per-period rate r.
@@ -742,7 +755,7 @@ def funding_ratio(assets, liabilities, r):
     a shortfall. Falls when rates fall (liabilities discounted less), which is
     exactly the interest-rate risk that liability-driven investing hedges.
     """
-    return float(pv(assets, r) / pv(liabilities, r))
+    return _to_scalar(pv(assets, r)) / _to_scalar(pv(liabilities, r))
 
 
 def bond_cash_flows(maturity, principal=100, coupon_rate=0.03, coupons_per_year=12):
@@ -756,7 +769,7 @@ def bond_cash_flows(maturity, principal=100, coupon_rate=0.03, coupons_per_year=
 
 def bond_price(maturity, principal=100, coupon_rate=0.03, coupons_per_year=12, discount_rate=0.03):
     cash_flows = bond_cash_flows(maturity, principal, coupon_rate, coupons_per_year)
-    return float(pv(cash_flows, discount_rate / coupons_per_year))
+    return _to_scalar(pv(cash_flows, discount_rate / coupons_per_year))
 
 
 def macaulay_duration(flows, discount_rate):
@@ -784,4 +797,4 @@ def match_durations(cf_t, cf_s, cf_l, discount_rate):
 
 def liability_pv_series(liabilities, rates):
     """Convenience: PV of a liability stream across a range of flat discount rates."""
-    return pd.Series({r: float(pv(liabilities, r)) for r in rates})
+    return pd.Series({r: _to_scalar(pv(liabilities, r)) for r in rates})
