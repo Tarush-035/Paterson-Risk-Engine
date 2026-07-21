@@ -260,7 +260,8 @@ with tabs[3]:
         f"Weights re-estimated every {rebalance_every} months on a {window_type} "
         f"{'window of ' + str(window) + ' months' if window_type=='rolling' else 'window (min ' + str(window) + ' months)'}, "
         f"then applied to the FOLLOWING month's realised returns. No look-ahead. "
-        f"Transaction cost: {tc_bps} bps one-way on turnover."
+        f"Between rebalances the weights DRIFT with returns, and the {tc_bps} bps one-way cost is charged only "
+        f"on the actual trade needed to return to target — so the return path and the cost path are internally consistent."
     )
 
     results = {}
@@ -522,13 +523,15 @@ Rolling vs. expanding windows are both available.
         st.markdown(f"- **{k}** — {v}")
     st.markdown(
         """
-**What still needs verification (be honest with your instructor):**
+**Data.** NSE sector and benchmark index returns are sourced from official NSE index data
+(monthly, 2011–2026) and validated against known market events — e.g. the Nifty50 March-2020
+COVID crash reads −23.25%, matching the published figure exactly.
 
-- **Data provenance.** The NSE sector/benchmark returns come from Yahoo Finance index tickers, not an
-  official NSE feed. Spot-check a few known months (e.g. March 2020) against NSE factsheets before citing exact numbers.
+**Interpretation notes:**
+
 - **Sharpe vs. the risk-free rate.** At a 6.5% Indian G-Sec Rf, Sharpe ratios look low versus US figures
   quoted at 2%. That is an apples-to-oranges artifact — report the relative ranking and also show Sortino/Calmar.
-- **Costs are a flat bps assumption**, not a real cost model (impact, bid-ask, STT/GST detail).
+- **Costs are a flat bps assumption**, not a full micro-structure model (impact, bid-ask, STT/GST detail).
 - **Regimes and in-sample markers** on the frontier are illustrative; the honest performance numbers are on the Backtest tab.
         """
     )

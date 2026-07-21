@@ -564,31 +564,42 @@ def backtest_strategy(returns, strategy_fn, window=36, rebalance_every=1,
     wealth_val = start
     gross_val = start
     wealth_hist, gross_hist, weight_rows, turnover_rows = [], [], [], []
-    prev_w = None
+    cur_w = None  # current weights, which DRIFT with returns between rebalances
 
     for t in range(window, len(dates)):
-        if prev_w is None or (t - window) % rebalance_every == 0:
+        # --- Rebalance decision at the START of month t ---
+        # Costs are charged only when we actually trade, and turnover is measured
+        # against the CURRENT (drifted) weights -- so the return path and the cost
+        # path are internally consistent (no free monthly rebalancing).
+        if cur_w is None or (t - window) % rebalance_every == 0:
             train_start = 0 if window_type == "expanding" else t - window
             train = returns.iloc[train_start:t]
-            new_w = strategy_fn(train, cov_method=cov_method, riskfree_rate=riskfree_rate)
-            new_w = np.clip(new_w, 0, None)
-            s = new_w.sum()
-            new_w = new_w / s if s > 0 else np.repeat(1 / len(assets), len(assets))
-            prior = prev_w if prev_w is not None else np.zeros_like(new_w)
-            turnover = np.abs(new_w - prior).sum()  # sum of |trades|, in [0, 2]
+            target_w = strategy_fn(train, cov_method=cov_method, riskfree_rate=riskfree_rate)
+            target_w = np.clip(target_w, 0, None)
+            s = target_w.sum()
+            target_w = target_w / s if s > 0 else np.repeat(1 / len(assets), len(assets))
+            drifted = cur_w if cur_w is not None else np.zeros(len(assets))
+            turnover = np.abs(target_w - drifted).sum()  # actual trade vs drifted book, in [0, 2]
             cost = tc_rate * turnover
             wealth_val *= (1 - cost)
-            prev_w = new_w
+            cur_w = target_w
         else:
             turnover = 0.0
         turnover_rows.append((dates[t], turnover))
+
+        # --- Apply month t's realised returns with the weights held this month ---
         r_t = returns.iloc[t].values
-        port_ret = float(np.dot(prev_w, r_t))
+        port_ret = float(np.dot(cur_w, r_t))
         wealth_val *= (1 + port_ret)
         gross_val *= (1 + port_ret)
         wealth_hist.append((dates[t], wealth_val))
         gross_hist.append((dates[t], gross_val))
-        weight_rows.append((dates[t], prev_w.copy()))
+        weight_rows.append((dates[t], cur_w.copy()))
+
+        # --- Let the weights DRIFT to end-of-month t for the next period ---
+        growth = cur_w * (1 + r_t)
+        total = growth.sum()
+        cur_w = growth / total if total > 0 else cur_w
 
     wealth = pd.Series(dict(wealth_hist))
     gross_wealth = pd.Series(dict(gross_hist))
