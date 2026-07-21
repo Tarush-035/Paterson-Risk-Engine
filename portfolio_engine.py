@@ -461,13 +461,12 @@ def run_cppi(risky_r, safe_r=None, m=3, start=1000, floor=0.8, riskfree_rate=0.0
         risky_r = pd.DataFrame(risky_r)
 
     if safe_r is None:
-        safe_r = pd.DataFrame().reindex_like(risky_r)
-        safe_r.values[:] = riskfree_rate / 12
+        safe_r = pd.DataFrame(riskfree_rate / 12, index=risky_r.index, columns=risky_r.columns)
 
-    account_history = pd.DataFrame().reindex_like(risky_r)
-    risky_w_history = pd.DataFrame().reindex_like(risky_r)
-    cushion_history = pd.DataFrame().reindex_like(risky_r)
-    floorval_history = pd.DataFrame().reindex_like(risky_r)
+    account_history = pd.DataFrame(0.0, index=risky_r.index, columns=risky_r.columns)
+    risky_w_history = pd.DataFrame(0.0, index=risky_r.index, columns=risky_r.columns)
+    cushion_history = pd.DataFrame(0.0, index=risky_r.index, columns=risky_r.columns)
+    floorval_history = pd.DataFrame(0.0, index=risky_r.index, columns=risky_r.columns)
 
     for step in range(n_steps):
         if drawdown_limit is not None:
