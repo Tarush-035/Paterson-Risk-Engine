@@ -133,7 +133,9 @@ with tabs[0]:
         footnote(
             "Sharpe = (annualized return − risk-free) / annualized vol. "
             "Sortino uses only downside vol; Calmar uses max drawdown. "
-            "Negative-skew, high-kurtosis assets (crash-prone) look worse on VaR/CVaR."
+            "Negative-skew, high-kurtosis assets (crash-prone) look worse on VaR/CVaR. "
+            "Indices are price-return (ex-dividend), so returns and Sharpe are modestly conservative "
+            "vs a total-return basis."
         )
     with c2:
         st.markdown("**Correlation matrix**")
@@ -524,8 +526,11 @@ Rolling vs. expanding windows are both available.
     st.markdown(
         """
 **Data.** NSE sector and benchmark index returns are sourced from official NSE index data
-(monthly, 2011–2026) and validated against known market events — e.g. the Nifty50 March-2020
-COVID crash reads −23.25%, matching the published figure exactly.
+(monthly, 2011–2026), and are **price-return (ex-dividend)** series. They are validated against
+real-world published Nifty 50 figures: the March-2020 COVID crash reads −23.25% and the calendar-year
+returns track the published price index year-for-year (2020 +14.9%, 2021 +24.1%, 2022 +4.3%).
+A total-return (TRI) version would add roughly 1.2–1.5%/year (the dividend yield), lifting each
+index's Sharpe by about +0.05 to +0.08 — so the figures here are, if anything, modestly conservative.
 
 **Interpretation notes:**
 
