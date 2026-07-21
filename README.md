@@ -6,18 +6,24 @@ applies it to Indian NSE sector indices.
 
 ## What it does
 
+An 8-tab interactive dashboard that implements the full EDHEC specialization toolkit on Indian
+markets, with a footnote on every tab explaining the method, its pros/cons, and how it maps to the
+real world.
+
 - **Universe**: 11 Indian NSE sector indices (Auto, Bank, FMCG, IT, Media, Metal, Pharma,
   PSU Bank, Realty, Energy, Infra), monthly returns 2011–2026, plus Nifty50/100/Next50/500,
   Midcap50/100 benchmarks.
-- **Strategies**: Equal Weight, Global Minimum Variance, Max Sharpe (tangency), Equal Risk
-  Contribution / Risk Parity, and Hierarchical Risk Parity (Lopez de Prado clustering method).
-- **Covariance estimation**: sample (historical), Ledoit-Wolf shrinkage, and EWMA
-  (RiskMetrics-style) volatility forecasting — the EWMA option is the "predictive" layer:
-  it reacts to changing volatility regimes (e.g. COVID) instead of weighting all history equally.
-- **Backtesting**: rolling walk-forward backtest with configurable estimation window and
-  rebalance frequency, benchmarked against equal-weight.
-- **CPPI insurance overlay**: dynamic floor-protected allocation between a chosen strategy
-  and a risk-free asset.
+- **7 allocation strategies**: Equal Weight, Global Minimum Variance, Max Sharpe (tangency),
+  Max Diversification (Choueifaty MDP), Equal Risk Contribution / Risk Parity, Hierarchical Risk
+  Parity (Lopez de Prado ML clustering), and Black-Litterman equilibrium.
+- **4 covariance estimators**: sample, Ledoit-Wolf shrinkage, constant-correlation (Elton-Gruber),
+  and EWMA (RiskMetrics) volatility forecasting.
+- **Efficient frontier + Capital Market Line**, with every strategy plotted at its in-sample risk/return.
+- **Walk-forward out-of-sample backtest** with transaction costs (bps on turnover), turnover and
+  cost-drag reporting, and rolling vs. expanding window options. Sharpe/Sortino/Calmar/MaxDD table.
+- **Regime analysis**: a Gaussian-mixture model separates calm/bull from turbulent/bear months.
+- **CPPI / TIPP insurance overlay**: dynamic floor-protected allocation with an optional ratcheting floor.
+- **ALM / Pension tab**: funding ratio vs. interest rates and duration-matching (LDI) immunization.
 
 ## Files
 
@@ -27,7 +33,7 @@ applies it to Indian NSE sector indices.
 | `portfolio_engine.py` | Strategy, risk, and backtest engine (no notebook-only dependencies) |
 | `ind_in_m_sectors.csv` | Indian sector monthly returns |
 | `ind_in_m_benchmarks.csv` | Indian benchmark index monthly returns |
-| `requirements.txt` | Python dependencies for deployment |
+| `requirements.txt` | Python dependencies for deployment (includes scikit-learn for shrinkage + regime detection) |
 
 ## Run locally
 

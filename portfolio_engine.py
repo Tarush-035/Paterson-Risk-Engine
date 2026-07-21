@@ -222,9 +222,28 @@ def ewma_vol_forecast(r, lam=0.94, periods_per_year=12):
     return np.sqrt(np.diag(cov))
 
 
+def constant_correlation_cov(r, periods_per_year=12):
+    """
+    Elton-Gruber constant-correlation covariance estimate. Replaces the full
+    correlation matrix with a single average pairwise correlation, keeping each
+    asset's own volatility. A structured, low-noise estimator: it throws away
+    unreliable individual pairwise correlations (which are hard to estimate from
+    short samples) in favour of one robust average, then rebuilds the covariance.
+    """
+    corr = r.corr().values
+    n = corr.shape[0]
+    off_diag = (corr.sum() - np.trace(corr)) / (n * (n - 1))
+    ccor = np.full_like(corr, off_diag)
+    np.fill_diagonal(ccor, 1.0)
+    sd = r.std().values
+    cov = ccor * np.outer(sd, sd)
+    return pd.DataFrame(cov, index=r.columns, columns=r.columns) * periods_per_year
+
+
 COV_METHODS = {
     "sample": sample_cov,
     "shrinkage": shrinkage_cov,
+    "constant_corr": constant_correlation_cov,
     "ewma": ewma_cov,
 }
 
@@ -318,6 +337,66 @@ def weights_risk_parity(returns_window, cov_method="sample", **kwargs):
     return w / w.sum()
 
 
+def weights_max_diversification(returns_window, cov_method="sample", **kwargs):
+    """
+    Most Diversified Portfolio (Choueifaty-Coignard). Maximises the
+    "diversification ratio" = (weighted average of asset vols) / (portfolio vol).
+    A ratio of 1 means no diversification benefit; higher means the portfolio
+    volatility is much lower than the average of its parts. Long-only.
+    """
+    cov = COV_METHODS[cov_method](returns_window).values
+    vols = np.sqrt(np.diag(cov))
+    n = cov.shape[0]
+    init_guess = np.repeat(1 / n, n)
+    bounds = ((0.0, 1.0),) * n
+    weights_sum_to_1 = {"type": "eq", "fun": lambda w: np.sum(w) - 1}
+
+    def neg_div_ratio(w, vols, cov):
+        port_vol = portfolio_vol(w, cov)
+        weighted_avg_vol = np.dot(w, vols)
+        return -weighted_avg_vol / port_vol if port_vol > 0 else 0.0
+
+    results = minimize(neg_div_ratio, init_guess, args=(vols, cov), method="SLSQP",
+                        options={"disp": False, "maxiter": 1000},
+                        constraints=(weights_sum_to_1,), bounds=bounds)
+    w = np.clip(results.x, 0, None)
+    return w / w.sum()
+
+
+def implied_returns(cov, w_prior, delta=2.5):
+    """
+    Reverse-optimization (Black-Litterman step 1): back out the expected returns
+    that would make the prior weights optimal. pi = delta * cov @ w_prior.
+    delta is the market risk-aversion coefficient.
+    """
+    return delta * cov.dot(w_prior)
+
+
+def weights_black_litterman(returns_window, cov_method="shrinkage", delta=2.5,
+                             riskfree_rate=0.065, w_prior=None, **kwargs):
+    """
+    Black-Litterman with NO active views -> returns the reverse-optimized
+    equilibrium portfolio, i.e. the prior. The value here is pedagogical and
+    practical: instead of feeding NOISY historical mean returns into the
+    optimizer (which is what makes plain Max Sharpe unstable), BL starts from
+    the returns *implied* by a sensible prior allocation. With no views, the
+    equilibrium simply reproduces the prior weights -- a deliberately robust,
+    stable allocation. Views can be layered on later.
+    """
+    cov = COV_METHODS[cov_method](returns_window)
+    n = cov.shape[0]
+    if w_prior is None:
+        w_prior = pd.Series(np.repeat(1 / n, n), index=returns_window.columns)
+    else:
+        w_prior = pd.Series(w_prior, index=returns_window.columns)
+    pi = implied_returns(cov, w_prior, delta=delta)
+    # With no views, posterior expected returns == equilibrium implied returns.
+    # Optimal weights under mean-variance with these returns recover the prior,
+    # but we run the MSR optimizer on pi for a clean, constrained long-only result.
+    return weights_msr(returns_window, riskfree_rate=riskfree_rate,
+                        cov_method=cov_method, er_override=pi.values)
+
+
 def _get_ivp(cov):
     """Inverse-variance portfolio (used inside HRP recursive bisection)."""
     ivp = 1.0 / np.diag(cov)
@@ -386,8 +465,67 @@ STRATEGIES = {
     "Equal Weight": weights_ew,
     "Global Minimum Variance (GMV)": weights_gmv,
     "Max Sharpe (MSR)": weights_msr,
+    "Max Diversification (MDP)": weights_max_diversification,
     "Risk Parity (ERC)": weights_risk_parity,
     "Hierarchical Risk Parity (HRP)": weights_hrp,
+    "Black-Litterman (equilibrium)": weights_black_litterman,
+}
+
+
+# ============================================================
+# STRATEGY & COVARIANCE METADATA (footnotes for the dashboard)
+# ============================================================
+
+STRATEGY_INFO = {
+    "Equal Weight": {
+        "idea": "Put 1/N in every asset. No estimation of returns or risk at all.",
+        "pros": "Impossible to overfit; a famously hard benchmark to beat (DeMiguel, Garlappi & Uppal 2009). Zero estimation error.",
+        "cons": "Ignores risk entirely — loads just as much into a 36%-vol PSU Bank basket as a 15%-vol FMCG basket. Higher turnover than cap-weight.",
+        "real_world": "The honest baseline every institutional allocator measures against. If a 'smart' strategy can't beat 1/N out-of-sample, it isn't smart.",
+    },
+    "Global Minimum Variance (GMV)": {
+        "idea": "Choose weights that minimise portfolio volatility, using only the covariance matrix (no return forecasts).",
+        "pros": "Avoids the noisiest input (expected returns). Historically delivers strong risk-adjusted returns and the shallowest drawdowns of the mean-variance family.",
+        "cons": "Concentrates in low-vol assets; sensitive to covariance estimation error (helped a lot by shrinkage). Can ignore attractive but volatile sectors.",
+        "real_world": "The workhorse of 'minimum volatility' / 'low-vol' smart-beta funds. Widely used precisely because it sidesteps return forecasting.",
+    },
+    "Max Sharpe (MSR)": {
+        "idea": "The tangency portfolio — maximise (return − rf) / volatility. Needs BOTH expected returns and covariance.",
+        "pros": "Theoretically optimal on the efficient frontier; the point the Capital Market Line touches.",
+        "cons": "Depends on historical mean returns, which are extremely noisy. Tends to make big, unstable bets and often underperforms out-of-sample — 'error maximization' (Michaud).",
+        "real_world": "Textbook-optimal, practically fragile. Its instability is the reason robust methods (shrinkage, Black-Litterman, HRP) exist.",
+    },
+    "Max Diversification (MDP)": {
+        "idea": "Maximise the diversification ratio: weighted-average asset vol divided by portfolio vol.",
+        "pros": "Explicitly hunts for diversification benefit; tends to spread risk across uncorrelated exposures rather than piling into one low-vol block.",
+        "cons": "Still covariance-dependent; can tilt toward high-vol assets that happen to be uncorrelated. No return input.",
+        "real_world": "Commercialised by TOBAM as 'Anti-Benchmark' funds. A genuine institutional product, not just an academic idea.",
+    },
+    "Risk Parity (ERC)": {
+        "idea": "Size positions so each asset contributes the SAME amount of risk to the portfolio (Equal Risk Contribution).",
+        "pros": "Well-diversified by construction; no return forecasts; more stable than MSR. Naturally down-weights the wild sectors.",
+        "cons": "Assumes equal risk = good, which isn't always true; ignores expected returns; in levered versions (Bridgewater-style) it adds leverage risk.",
+        "real_world": "The basis of Bridgewater's 'All Weather' and a whole category of risk-parity funds — one of the most successful practical allocation ideas of the last 20 years.",
+    },
+    "Hierarchical Risk Parity (HRP)": {
+        "idea": "Machine-learning method (Lopez de Prado 2016): cluster assets by correlation, then split risk down the tree via recursive bisection. No matrix inversion.",
+        "pros": "Numerically stable where MSR/GMV break down (near-singular covariance); respects the correlation structure (e.g. keeps the two bank sectors together). Robust to noisy, short samples like ours.",
+        "cons": "Newer, less intuitive to explain; results depend on the clustering/linkage choice; still no return forecast.",
+        "real_world": "The flagship 'ML for portfolio construction' technique — exactly the Course 3, Week 3 material, and increasingly used at quant funds.",
+    },
+    "Black-Litterman (equilibrium)": {
+        "idea": "Reverse-engineer the expected returns implied by a sensible prior allocation, instead of trusting raw historical means. Here we run it with no active views, so it returns the robust equilibrium.",
+        "pros": "Fixes Max Sharpe's core weakness — replaces noisy historical means with stable, market-implied returns. Views can be blended in with confidence levels.",
+        "cons": "With no views it reduces to the prior (here, an equal-risk-ish equilibrium); the choice of prior and risk-aversion delta matters; full power only shows with well-formed views.",
+        "real_world": "Developed at Goldman Sachs; the industry-standard way institutional desks combine a market prior with analyst views.",
+    },
+}
+
+COV_INFO = {
+    "sample": "Plain historical covariance. Unbiased but noisy — with 11 sectors and ~175 months, many pairwise correlations are estimated imprecisely.",
+    "shrinkage": "Ledoit-Wolf shrinkage pulls the noisy sample matrix toward a structured target. Reduces estimation error; usually the best default for optimization.",
+    "constant_corr": "Elton-Gruber: replace all pairwise correlations with one average correlation. Maximally structured, minimally noisy — a robust foil to the sample matrix.",
+    "ewma": "Exponentially-weighted (RiskMetrics, λ=0.94). Recent months count more, so it forecasts the CURRENT volatility regime rather than averaging across calm and crisis equally.",
 }
 
 
@@ -397,45 +535,73 @@ STRATEGIES = {
 
 def backtest_strategy(returns, strategy_fn, window=36, rebalance_every=1,
                        start=1000, cov_method="sample", riskfree_rate=0.065,
-                       transaction_cost=0.0):
+                       transaction_cost_bps=0.0, window_type="rolling"):
     """
-    Rolling-window, walk-forward backtest.
+    Walk-forward, out-of-sample backtest with transaction costs and turnover.
+
     - returns: full history of DECIMAL monthly returns (DataFrame)
     - strategy_fn: one of the functions in STRATEGIES
-    - window: number of trailing months used to estimate weights at each rebalance
+    - window: trailing months used to estimate weights (rolling) or minimum
+      months before the first rebalance (expanding)
     - rebalance_every: rebalance frequency in months
-    - transaction_cost: proportional cost applied to turnover at each rebalance
+    - transaction_cost_bps: one-way cost in basis points applied to turnover at
+      each rebalance (e.g. 10 = 0.10% per unit traded). India cash-equity all-in
+      costs are roughly 10-30 bps; 10 is a reasonable default for index ETFs.
+    - window_type: "rolling" (fixed lookback) or "expanding" (all history to date)
 
-    Returns: (wealth: pd.Series, weight_history: pd.DataFrame, turnover: pd.Series)
+    No look-ahead: weights at month t use only data strictly before t
+    (returns.iloc[start:t]); they are then applied to month t's realised return.
+
+    Returns dict with: wealth, gross_wealth (no costs), weights (DataFrame),
+    turnover (Series), total_cost_drag (float, wealth fraction lost to costs).
     """
     assets = returns.columns
     dates = returns.index
     if len(dates) <= window:
         raise ValueError(f"Not enough history: need > {window} months, got {len(dates)}")
 
+    tc_rate = transaction_cost_bps / 10000.0
     wealth_val = start
-    wealth_hist, weight_rows, turnover_rows = [], [], []
+    gross_val = start
+    wealth_hist, gross_hist, weight_rows, turnover_rows = [], [], [], []
     prev_w = None
 
     for t in range(window, len(dates)):
         if prev_w is None or (t - window) % rebalance_every == 0:
-            train = returns.iloc[t - window:t]
+            train_start = 0 if window_type == "expanding" else t - window
+            train = returns.iloc[train_start:t]
             new_w = strategy_fn(train, cov_method=cov_method, riskfree_rate=riskfree_rate)
             new_w = np.clip(new_w, 0, None)
-            new_w = new_w / new_w.sum()
-            tc = transaction_cost * np.abs(new_w - (prev_w if prev_w is not None else np.zeros_like(new_w))).sum()
-            wealth_val *= (1 - tc)
+            s = new_w.sum()
+            new_w = new_w / s if s > 0 else np.repeat(1 / len(assets), len(assets))
+            prior = prev_w if prev_w is not None else np.zeros_like(new_w)
+            turnover = np.abs(new_w - prior).sum()  # sum of |trades|, in [0, 2]
+            cost = tc_rate * turnover
+            wealth_val *= (1 - cost)
             prev_w = new_w
-        turnover_rows.append((dates[t], 0.0))
+        else:
+            turnover = 0.0
+        turnover_rows.append((dates[t], turnover))
         r_t = returns.iloc[t].values
         port_ret = float(np.dot(prev_w, r_t))
         wealth_val *= (1 + port_ret)
+        gross_val *= (1 + port_ret)
         wealth_hist.append((dates[t], wealth_val))
+        gross_hist.append((dates[t], gross_val))
         weight_rows.append((dates[t], prev_w.copy()))
 
-    wealth = pd.Series({d: v for d, v in wealth_hist})
+    wealth = pd.Series(dict(wealth_hist))
+    gross_wealth = pd.Series(dict(gross_hist))
     weight_history = pd.DataFrame({d: w for d, w in weight_rows}, index=assets).T
-    return wealth, weight_history
+    turnover = pd.Series(dict(turnover_rows))
+    total_cost_drag = 1 - (wealth.iloc[-1] / gross_wealth.iloc[-1]) if gross_wealth.iloc[-1] > 0 else 0.0
+    return {
+        "wealth": wealth,
+        "gross_wealth": gross_wealth,
+        "weights": weight_history,
+        "turnover": turnover,
+        "total_cost_drag": total_cost_drag,
+    }
 
 
 def wealth_to_returns(wealth: pd.Series):
@@ -490,3 +656,132 @@ def run_cppi(risky_r, safe_r=None, m=3, start=1000, floor=0.8, riskfree_rate=0.0
         "Risk Budget": cushion_history, "Risky Allocation": risky_w_history,
         "Floor Value": floorval_history, "m": m, "start": start, "floor": floor,
     }
+
+
+# ============================================================
+# 8. REGIME ANALYSIS (Course 3, Week 4)
+# ============================================================
+
+def detect_regimes(benchmark_returns, n_regimes=2, random_state=42):
+    """
+    Fit a Gaussian Mixture Model on a benchmark return series to classify each
+    month into a market regime (e.g. calm/bull vs turbulent/bear). This is a
+    lightweight, explainable version of the regime-switching models in Course 3:
+    unsupervised ML that separates 'normal' months from 'crisis' months by their
+    return/volatility signature.
+
+    Returns a DataFrame with the return, assigned regime label, and a
+    human-readable regime name (the lowest-mean regime is tagged 'Turbulent').
+    """
+    try:
+        from sklearn.mixture import GaussianMixture
+    except ImportError:
+        raise ImportError("scikit-learn is required for regime detection")
+
+    r = benchmark_returns.dropna()
+    X = r.values.reshape(-1, 1)
+    gmm = GaussianMixture(n_components=n_regimes, covariance_type="full",
+                          random_state=random_state, n_init=5)
+    labels = gmm.fit_predict(X)
+    means = gmm.means_.flatten()
+    # Rank regimes by mean return: lowest = most turbulent/bearish
+    order = np.argsort(means)
+    if n_regimes == 2:
+        names = {order[0]: "Turbulent / Bear", order[1]: "Calm / Bull"}
+    else:
+        names = {lab: f"Regime {rank+1} (mean {means[lab]*100:.1f}%/m)"
+                 for rank, lab in enumerate(order)}
+    out = pd.DataFrame({"Return": r.values, "Regime": labels}, index=r.index)
+    out["Regime Name"] = out["Regime"].map(names)
+    return out, gmm
+
+
+def regime_stats(regime_df, periods_per_year=12):
+    """Per-regime summary: frequency, mean/vol/annualized return, worst month."""
+    rows = []
+    for name, grp in regime_df.groupby("Regime Name"):
+        r = grp["Return"]
+        rows.append({
+            "Regime": name,
+            "Months": len(r),
+            "% of Time": f"{100*len(r)/len(regime_df):.0f}%",
+            "Mean Monthly": f"{r.mean()*100:.2f}%",
+            "Annualized Vol": f"{r.std()*np.sqrt(periods_per_year)*100:.1f}%",
+            "Worst Month": f"{r.min()*100:.1f}%",
+            "Best Month": f"{r.max()*100:.1f}%",
+        })
+    return pd.DataFrame(rows)
+
+
+# ============================================================
+# 9. ASSET-LIABILITY MANAGEMENT / PENSION (Course 1, Week 4)
+#    Ported from edhec_risk_kit.py; the building blocks for a pension / LDI tool.
+# ============================================================
+
+def discount(t, r):
+    """
+    Price today of $1 paid at time t, given per-period rate r.
+    Returns a DataFrame indexed by t (works if r is scalar/Series/DataFrame).
+    """
+    discounts = pd.DataFrame([(r + 1) ** -i for i in t])
+    discounts.index = t
+    return discounts
+
+
+def pv(flows, r):
+    """Present value of a cash-flow Series (indexed by time) at rate r."""
+    dates = flows.index
+    discounts = discount(dates, r)
+    return discounts.multiply(flows, axis="rows").sum()
+
+
+def funding_ratio(assets, liabilities, r):
+    """
+    Funding ratio = PV(assets) / PV(liabilities). The core pension solvency
+    number: >1 means the fund can cover its promised payouts at rate r, <1 means
+    a shortfall. Falls when rates fall (liabilities discounted less), which is
+    exactly the interest-rate risk that liability-driven investing hedges.
+    """
+    return float(pv(assets, r) / pv(liabilities, r))
+
+
+def bond_cash_flows(maturity, principal=100, coupon_rate=0.03, coupons_per_year=12):
+    n_coupons = round(maturity * coupons_per_year)
+    coupon_amt = principal * coupon_rate / coupons_per_year
+    coupon_times = np.arange(1, n_coupons + 1)
+    cash_flows = pd.Series(data=coupon_amt, index=coupon_times)
+    cash_flows.iloc[-1] += principal
+    return cash_flows
+
+
+def bond_price(maturity, principal=100, coupon_rate=0.03, coupons_per_year=12, discount_rate=0.03):
+    cash_flows = bond_cash_flows(maturity, principal, coupon_rate, coupons_per_year)
+    return float(pv(cash_flows, discount_rate / coupons_per_year))
+
+
+def macaulay_duration(flows, discount_rate):
+    """
+    Macaulay duration: the cash-flow-weighted average time to receipt. It is the
+    key sensitivity number for LDI — to immunize a liability against small rate
+    moves, you match the duration of your bond assets to the liability's duration.
+    """
+    discounted_flows = discount(flows.index, discount_rate) * flows.values.reshape(-1, 1)
+    weights = discounted_flows / discounted_flows.sum()
+    return float(np.average(flows.index, weights=weights.values.flatten()))
+
+
+def match_durations(cf_t, cf_s, cf_l, discount_rate):
+    """
+    Weight W in the SHORT bond (and 1-W in the LONG bond) so the blended
+    duration matches the target liability duration. This is the mechanical
+    core of building a duration-matched liability-hedging portfolio.
+    """
+    d_t = macaulay_duration(cf_t, discount_rate)
+    d_s = macaulay_duration(cf_s, discount_rate)
+    d_l = macaulay_duration(cf_l, discount_rate)
+    return (d_l - d_t) / (d_l - d_s)
+
+
+def liability_pv_series(liabilities, rates):
+    """Convenience: PV of a liability stream across a range of flat discount rates."""
+    return pd.Series({r: float(pv(liabilities, r)) for r in rates})
