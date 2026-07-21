@@ -34,7 +34,22 @@ st.set_page_config(page_title="Indian Portfolio & Risk Engine", layout="wide",
 def load_all():
     sectors = pe.load_returns("ind_in_m_sectors.csv")
     benchmarks = pe.load_returns("ind_in_m_benchmarks.csv")
-    return sectors, benchmarks
+    # Multi-asset pool (optional): India equity, US equity INR, Gold INR, G-Sec, Cash.
+    # Drop US T-bill (price-return understated) and guard against any residual NAV glitch.
+    pool = None
+    try:
+        pool = pe.load_returns("ind_in_m_pool.csv")
+        pool = pool.drop(columns=[c for c in ["US_Tbill_INR"] if c in pool.columns])
+        # defensive glitch clean: any monthly return beyond +-40% on a defensive/bond/cash
+        # sleeve is a data error -> mask and interpolate (equities can legitimately be large).
+        defensive = [c for c in ["GSec_10y", "Cash", "Gold_INR"] if c in pool.columns]
+        for c in defensive:
+            bad = pool[c].abs() > 0.40
+            if bad.any():
+                pool[c] = pool[c].mask(bad).interpolate()
+    except Exception:
+        pool = None
+    return sectors, benchmarks, pool
 
 
 def footnote(text):
@@ -55,7 +70,7 @@ def strategy_card(name):
     st.markdown(f"*In the real world:* {info['real_world']}")
 
 
-sectors, benchmarks = load_all()
+sectors, benchmarks, pool = load_all()
 
 # ------------------------------------------------------------
 # Sidebar — global controls
@@ -64,9 +79,14 @@ sectors, benchmarks = load_all()
 st.sidebar.title("Controls")
 st.sidebar.caption("Indian NSE indices · EDHEC methodology")
 
-universe_choice = st.sidebar.radio("Universe", ["Sectors", "Benchmarks"], index=0,
-                                    help="Sectors = 11 NSE sector indices. Benchmarks = Nifty50/100/500 etc.")
-universe = sectors if universe_choice == "Sectors" else benchmarks
+universe_options = ["Sectors", "Benchmarks"]
+if pool is not None:
+    universe_options.append("Multi-Asset")
+universe_choice = st.sidebar.radio(
+    "Universe", universe_options, index=0,
+    help="Sectors = 11 NSE sector indices. Benchmarks = Nifty50/100/500 etc. "
+         "Multi-Asset = India equity, US equity (INR), Gold (INR), G-Sec, Cash.")
+universe = {"Sectors": sectors, "Benchmarks": benchmarks, "Multi-Asset": pool}[universe_choice]
 
 all_assets = universe.columns.tolist()
 default_assets = all_assets if len(all_assets) <= 8 else all_assets[:8]

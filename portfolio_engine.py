@@ -279,9 +279,11 @@ def _minimize_vol(target_return, er, cov):
                          "fun": lambda w, er: target_return - portfolio_return(w, er)}
     weights_sum_to_1 = {"type": "eq", "fun": lambda w: np.sum(w) - 1}
     results = minimize(portfolio_vol, init_guess, args=(cov,), method="SLSQP",
-                        options={"disp": False}, constraints=(return_is_target, weights_sum_to_1),
-                        bounds=bounds)
-    return results.x
+                        options={"disp": False, "maxiter": 1000, "ftol": 1e-10},
+                        constraints=(return_is_target, weights_sum_to_1), bounds=bounds)
+    w = np.clip(results.x, 0, None)
+    s = w.sum()
+    return w / s if s > 0 else np.repeat(1 / len(er), len(er))
 
 
 def weights_gmv(returns_window, cov_method="sample", **kwargs):
@@ -305,8 +307,14 @@ def weights_msr(returns_window, riskfree_rate=0.065, cov_method="sample", er_ove
         return -r / vol if vol > 0 else 0.0
 
     results = minimize(neg_sharpe, init_guess, args=(riskfree_rate, er, cov.values), method="SLSQP",
-                        options={"disp": False}, constraints=(weights_sum_to_1,), bounds=bounds)
-    return results.x
+                        options={"disp": False, "maxiter": 1000, "ftol": 1e-10},
+                        constraints=(weights_sum_to_1,), bounds=bounds)
+    # Robustify: SLSQP can return a near-corner solution that doesn't perfectly
+    # renormalize when the covariance is ill-conditioned (e.g. a near-riskless cash
+    # asset in a multi-asset pool). Clip and renormalize to guarantee valid weights.
+    w = np.clip(results.x, 0, None)
+    s = w.sum()
+    return w / s if s > 0 else np.repeat(1 / n, n)
 
 
 def weights_risk_parity(returns_window, cov_method="sample", **kwargs):
