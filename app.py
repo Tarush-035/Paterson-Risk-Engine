@@ -52,6 +52,26 @@ def load_all():
     return sectors, benchmarks, pool
 
 
+@st.cache_data(show_spinner=False)
+def run_backtest(data, strat_name, window, rebalance_every, cov_method, riskfree_rate, tc_bps, window_type):
+    """Cached backtest — recomputed only when its inputs change, so switching tabs
+    or nudging an unrelated widget doesn't re-run the whole walk-forward loop."""
+    return pe.backtest_strategy(data, pe.STRATEGIES[strat_name], window=window,
+                                rebalance_every=rebalance_every, cov_method=cov_method,
+                                riskfree_rate=riskfree_rate, transaction_cost_bps=tc_bps,
+                                window_type=window_type)
+
+
+@st.cache_data(show_spinner=False)
+def frontier_points(data, cov_method, n_points=40):
+    """Cached efficient-frontier volatilities for each target return."""
+    er = pe.annualize_rets(data, 12)
+    cov = pe.COV_METHODS[cov_method](data)
+    targets = np.linspace(er.min(), er.max(), n_points)
+    vols = [pe.portfolio_vol(pe._minimize_vol(t, er.values, cov.values), cov.values) for t in targets]
+    return list(targets), vols
+
+
 def footnote(text):
     st.caption(text)
 
@@ -151,11 +171,9 @@ with tabs[0]:
         st.dataframe(pe.summary_stats(data, riskfree_rate=riskfree_rate).round(3),
                      use_container_width=True)
         footnote(
-            "Sharpe = (annualized return − risk-free) / annualized vol. "
-            "Sortino uses only downside vol; Calmar uses max drawdown. "
-            "Negative-skew, high-kurtosis assets (crash-prone) look worse on VaR/CVaR. "
-            "Indices are price-return (ex-dividend), so returns and Sharpe are modestly conservative "
-            "vs a total-return basis."
+            "Sharpe / Sortino / Calmar = return per unit of total / downside / worst-drawdown risk. "
+            "VaR & CVaR = typical and average worst-case monthly loss. "
+            "Equities are price-return (ex-dividend)."
         )
     with c2:
         st.markdown("**Correlation matrix**")
@@ -169,8 +187,9 @@ with tabs[0]:
                 ax.text(j, i, f"{corr.iloc[i, j]:.2f}", ha="center", va="center", fontsize=7)
         fig.colorbar(im, ax=ax, shrink=0.8)
         st.pyplot(fig)
-        footnote("Lower correlations = more diversification benefit available. "
-                 "Optimizers exploit exactly this structure.")
+        footnote("Low/negative correlations = real diversification to exploit. "
+                 "Equity sectors cluster high (~0.6-0.8); asset classes don't — that gap is the "
+                 "whole point of the Multi-Asset universe.")
 
 # ============================================================
 # TAB 2 — EFFICIENT FRONTIER + CML
@@ -180,10 +199,7 @@ with tabs[1]:
     er = pe.annualize_rets(data, 12)
     cov = pe.COV_METHODS[cov_method](data)
 
-    n_points = 40
-    target_rs = np.linspace(er.min(), er.max(), n_points)
-    frontier_vols = [pe.portfolio_vol(pe._minimize_vol(tr, er.values, cov.values), cov.values)
-                     for tr in target_rs]
+    target_rs, frontier_vols = frontier_points(data, cov_method, n_points=40)
 
     markers = {
         "EW": (pe.weights_ew(data), "gold", "o"),
@@ -221,9 +237,9 @@ with tabs[1]:
     ax.grid(alpha=0.3)
     st.pyplot(fig)
     footnote(
-        "The frontier is the set of minimum-variance portfolios for each return level. "
-        "The CML runs from the risk-free rate through the tangency (Max-Sharpe) portfolio; its slope IS the best achievable Sharpe ratio. "
-        "Every strategy marker is plotted at its in-sample risk/return — but note these are IN-SAMPLE; the Backtest tab shows the honest out-of-sample story."
+        "Frontier = lowest-risk portfolio for each return level. The CML runs from the risk-free rate "
+        "through the Max-Sharpe portfolio; its slope is the best achievable Sharpe. "
+        "Markers are IN-SAMPLE — the Backtest tab has the honest out-of-sample numbers."
     )
 
     st.markdown("**Weights implied by each strategy (in-sample)**")
@@ -279,20 +295,17 @@ with tabs[2]:
 with tabs[3]:
     st.subheader("Walk-forward, out-of-sample backtest (net of costs)")
     st.caption(
-        f"Weights re-estimated every {rebalance_every} months on a {window_type} "
-        f"{'window of ' + str(window) + ' months' if window_type=='rolling' else 'window (min ' + str(window) + ' months)'}, "
-        f"then applied to the FOLLOWING month's realised returns. No look-ahead. "
-        f"Between rebalances the weights DRIFT with returns, and the {tc_bps} bps one-way cost is charged only "
-        f"on the actual trade needed to return to target — so the return path and the cost path are internally consistent."
+        f"Out-of-sample walk-forward: weights use only past data ({window}m {window_type} window, "
+        f"rebalanced every {rebalance_every}m), applied to next month's return. No look-ahead. "
+        f"Weights drift between rebalances; {tc_bps} bps cost charged on actual turnover only."
     )
 
-    results = {}
-    for name, fn in pe.STRATEGIES.items():
+    results, stats = {}, {}
+    for name in pe.STRATEGIES:
         try:
-            res = pe.backtest_strategy(data, fn, window=window, rebalance_every=rebalance_every,
-                                       cov_method=cov_method, riskfree_rate=riskfree_rate,
-                                       transaction_cost_bps=tc_bps, window_type=window_type)
+            res = run_backtest(data, name, window, rebalance_every, cov_method, riskfree_rate, tc_bps, window_type)
             results[name] = res
+            stats[name] = pe.summary_stats(pe.wealth_to_returns(res["wealth"]), riskfree_rate=riskfree_rate)
         except ValueError as e:
             st.error(f"{name}: {e}")
 
@@ -300,8 +313,7 @@ with tabs[3]:
         # Comparison table
         rows = []
         for name, res in results.items():
-            r = pe.wealth_to_returns(res["wealth"])
-            s = pe.summary_stats(r, riskfree_rate=riskfree_rate)
+            s = stats[name]
             rows.append({
                 "Strategy": name,
                 "Ann Return": f"{s['Annualized Return']*100:.1f}%",
@@ -327,20 +339,17 @@ with tabs[3]:
         ax.grid(alpha=0.3)
         st.pyplot(fig)
 
-        # Auto-generated commentary
-        best_sharpe = max(results, key=lambda n: pe.summary_stats(pe.wealth_to_returns(results[n]["wealth"]), riskfree_rate=riskfree_rate)["Sharpe Ratio"])
-        shallowest_dd = min(results, key=lambda n: abs(pe.summary_stats(pe.wealth_to_returns(results[n]["wealth"]), riskfree_rate=riskfree_rate)["Max Drawdown"]))
+        # Auto-generated commentary (reuse already-computed stats — no recompute)
+        best_sharpe = max(stats, key=lambda n: stats[n]["Sharpe Ratio"])
+        shallowest_dd = min(stats, key=lambda n: abs(stats[n]["Max Drawdown"]))
         st.markdown(
-            f"**Reading the results.** On this run, **{best_sharpe}** has the best risk-adjusted "
-            f"return (Sharpe) and **{shallowest_dd}** has the shallowest drawdown. "
-            "A recurring pattern in Indian sector data: the strategies that DON'T rely on forecasting "
-            "expected returns (HRP, Risk Parity, GMV, Equal Weight) tend to beat Max Sharpe out-of-sample, "
-            "because historical mean returns are too noisy to optimize on directly — the textbook case for robust methods."
+            f"**Reading it:** **{best_sharpe}** has the best Sharpe, **{shallowest_dd}** the shallowest "
+            "drawdown. Recurring pattern: the return-agnostic methods (HRP, Risk Parity, GMV, Equal Weight) "
+            "tend to beat Max Sharpe out-of-sample — historical mean returns are too noisy to optimize on directly."
         )
         footnote(
-            "Sharpe is sensitive to the risk-free slider; Sortino and Calmar less so. "
-            "Judge strategies on the RELATIVE ranking, which is stable, more than the absolute numbers. "
-            "Higher turnover strategies lose more to the cost drag — visible in the two right-hand columns."
+            "Judge the relative ranking (stable), not absolute numbers (Sharpe shifts with the risk-free slider). "
+            "Higher-turnover strategies lose more to cost drag — see the two right-hand columns."
         )
 
 # ============================================================
@@ -349,9 +358,8 @@ with tabs[3]:
 with tabs[4]:
     st.subheader("Market regimes (unsupervised ML: Gaussian mixture)")
     st.caption(
-        "A 2-state Gaussian Mixture Model is fit to a benchmark return series, "
-        "splitting history into a calm/bull regime and a turbulent/bear regime by "
-        "their return-and-volatility signature. This is the Course 3 regime-analysis idea in miniature."
+        "A Gaussian Mixture Model (unsupervised ML) splits history into calm/bull vs turbulent/bear "
+        "months by their return-and-volatility signature."
     )
     bench_options = benchmarks.columns.tolist()
     bench_pick = st.selectbox("Benchmark to detect regimes on", bench_options,
@@ -378,10 +386,9 @@ with tabs[4]:
     ax.grid(alpha=0.3)
     st.pyplot(fig)
     footnote(
-        "The turbulent regime clusters the crash months (e.g. March 2020) and carries far higher "
-        "volatility and deeper worst-months. In practice you'd de-risk (shift toward GMV / CPPI / cash) "
-        "when the model flags a turbulent state. Caveat: regimes are labelled in-sample here; a live system "
-        "would classify the current month from the fitted model without peeking at the future."
+        "The turbulent regime clusters the crash months (e.g. March 2020) — far higher vol, deeper losses. "
+        "Practical use: de-risk (GMV / CPPI / cash) when it flags turbulence. Caveat: regimes are labelled "
+        "in-sample here; a live signal would classify only from past data."
     )
 
 # ============================================================
@@ -390,9 +397,8 @@ with tabs[4]:
 with tabs[5]:
     st.subheader("CPPI — dynamic downside insurance")
     st.caption(
-        "Constant Proportion Portfolio Insurance keeps wealth above a floor by "
-        "allocating m × (wealth − floor) to the risky strategy and the rest to a "
-        "safe asset. Optionally the floor ratchets up with the peak (drawdown-constrained / TIPP)."
+        "CPPI keeps wealth above a floor: it holds m × (wealth − floor) in the risky strategy, the rest "
+        "in a safe asset. Optional ratcheting floor (TIPP) rises with the peak."
     )
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -405,10 +411,7 @@ with tabs[5]:
         use_dd = st.checkbox("Ratcheting floor (TIPP)", value=False)
     dd_limit = (1 - cppi_floor) if use_dd else None
 
-    res = pe.backtest_strategy(data, pe.STRATEGIES[cppi_strat], window=window,
-                               rebalance_every=rebalance_every, cov_method=cov_method,
-                               riskfree_rate=riskfree_rate, transaction_cost_bps=tc_bps,
-                               window_type=window_type)
+    res = run_backtest(data, cppi_strat, window, rebalance_every, cov_method, riskfree_rate, tc_bps, window_type)
     risky_r = pe.wealth_to_returns(res["wealth"]).to_frame(cppi_strat)
     cppi = pe.run_cppi(risky_r, m=cppi_m, start=1000, floor=cppi_floor,
                        riskfree_rate=riskfree_rate, drawdown_limit=dd_limit)
@@ -436,10 +439,9 @@ with tabs[5]:
     c1.metric("CPPI final wealth", f"₹{cppi['Wealth'][cppi_strat].iloc[-1]:,.0f}")
     c2.metric("Uninsured final wealth", f"₹{cppi['Risky Wealth'][cppi_strat].iloc[-1]:,.0f}")
     footnote(
-        "Pros: hard floor protection, participates in upside via the multiplier. "
-        "Cons: in a sharp V-shaped crash (like March 2020) CPPI can 'lock in' losses by de-risking at "
-        "the bottom and miss the rebound — the classic cash-lock / gap-risk criticism. Higher m = more "
-        "upside but more gap risk. A higher floor is safer but caps growth."
+        "Pro: hard floor + upside via the multiplier. Con: in a V-shaped crash it can de-risk at the "
+        "bottom and miss the rebound (cash-lock / gap risk). Higher m = more upside but more gap risk; "
+        "higher floor = safer but caps growth."
     )
 
 # ============================================================
@@ -448,9 +450,8 @@ with tabs[5]:
 with tabs[6]:
     st.subheader("Asset-Liability Management — the pension / LDI lens")
     st.caption(
-        "Course 1 Week 4. A pension fund cares about its liabilities (future payouts), not just asset "
-        "returns. Two ideas: the funding ratio (are we solvent at today's rates?) and duration matching "
-        "(immunize the liability against rate moves)."
+        "A pension cares about liabilities (future payouts), not just returns. Two tools: funding ratio "
+        "(solvent at today's rates?) and duration matching (immunize against rate moves)."
     )
 
     st.markdown("#### 1. Funding ratio vs. interest rates")
@@ -479,8 +480,8 @@ with tabs[6]:
     st.metric(f"Funding ratio at {riskfree_rate*100:.1f}%", f"{fr_now:.2f}",
               delta="surplus" if fr_now >= 1 else "shortfall")
     footnote(
-        "This is why falling rates are a pension fund's nightmare: liabilities balloon (discounted less) "
-        "faster than a typical asset mix, so the funding ratio drops. LDI hedges exactly this."
+        "Why falling rates are a pension's nightmare: liabilities balloon faster than assets, so the "
+        "funding ratio drops. LDI hedges exactly this."
     )
 
     st.markdown("---")
@@ -514,51 +515,59 @@ with tabs[6]:
         "so the blended duration matches the liability and small rate moves hit assets and liabilities equally."
     )
     footnote(
-        "This is the mechanical core of a liability-hedging portfolio. A full pension solution splits capital "
-        "between this hedging portfolio and a return-seeking portfolio (the equity strategies in the other tabs) — "
-        "that split is the 'risk budget'. Building that combined LDI + growth engine is the natural next module."
+        "The core of a liability-hedging portfolio. A full pension splits capital between this hedge and a "
+        "return-seeking portfolio (the strategies in other tabs) — that split is the 'risk budget'."
     )
 
 # ============================================================
 # TAB 8 — NOTES
 # ============================================================
 with tabs[7]:
-    st.subheader("Methodology, data, and honest caveats")
+    st.subheader("Methodology, data & caveats")
     st.markdown(
         """
-**What this tool implements (mapped to the EDHEC specialization):**
+**Universes.** *Sectors* = 11 NSE sector indices. *Benchmarks* = Nifty50/100/500 etc. (heavily overlapping).
+*Multi-Asset* = the 5-asset pool below — the only universe with genuinely uncorrelated building blocks.
 
-- **Course 1** — annualized return/vol, Sharpe/Sortino/Calmar, VaR/CVaR, drawdown; the mean-variance
-  efficient frontier and Capital Market Line; CPPI/TIPP insurance; ALM (funding ratio, duration matching).
-- **Course 2** — robust covariance (Ledoit-Wolf shrinkage, constant-correlation, EWMA forecast);
-  Black-Litterman equilibrium (implied returns instead of noisy historical means).
-- **Course 3** — Hierarchical Risk Parity (clustering-based ML allocation); regime analysis via a
-  Gaussian mixture model.
+**Methodology (EDHEC courses):**
 
-**Backtesting discipline:** every backtest is walk-forward and strictly out-of-sample — weights at month *t*
-use only data before *t*, then get applied to *t*'s realised return. Transaction costs are charged on turnover.
-Rolling vs. expanding windows are both available.
+- **Course 1** — return/risk stats, efficient frontier + CML, CPPI/TIPP insurance, ALM (funding ratio, duration matching).
+- **Course 2** — robust covariance (shrinkage, constant-correlation, EWMA), Black-Litterman equilibrium.
+- **Course 3** — Hierarchical Risk Parity (ML clustering), regime analysis (Gaussian mixture).
+
+**Backtesting.** Walk-forward, strictly out-of-sample: weights use only data before month *t*, applied to
+*t*'s return. Weights drift between rebalances; costs charged on actual turnover; rolling or expanding windows.
         """
     )
-    st.markdown("**Covariance estimator notes:**")
+    st.markdown("**Multi-Asset pool — assets, proxies & conversions:**")
+    st.markdown(
+        """
+| Asset | Instrument / proxy | Return type | Conversion |
+|---|---|---|---|
+| India equity | Nifty 50 index | Price (ex-div) | native INR |
+| US equity | S&P 500 (^GSPC) × USD-INR | Price (ex-div) | (1+r_USD)(1+Δfx)−1 |
+| Gold | GOLDBEES ETF (NSE) | Total | native INR |
+| G-Sec 10y | ICICI Pru Gilt Fund NAV | Total (net fees) | monthly NAV change |
+| Cash | HDFC Liquid Fund NAV | Total (net fees) | monthly NAV change |
+
+FX conversion is multiplicative and monthly (unit-tested). Defensive-sleeve data glitches (>±40% in a month)
+are auto-cleaned by interpolation.
+        """
+    )
+    st.markdown("**Covariance estimators:**")
     for k, v in pe.COV_INFO.items():
         st.markdown(f"- **{k}** — {v}")
     st.markdown(
         """
-**Data.** NSE sector and benchmark index returns are sourced from official NSE index data
-(monthly, 2011–2026), and are **price-return (ex-dividend)** series. They are validated against
-real-world published Nifty 50 figures: the March-2020 COVID crash reads −23.25% and the calendar-year
-returns track the published price index year-for-year (2020 +14.9%, 2021 +24.1%, 2022 +4.3%).
-A total-return (TRI) version would add roughly 1.2–1.5%/year (the dividend yield), lifting each
-index's Sharpe by about +0.05 to +0.08 — so the figures here are, if anything, modestly conservative.
+**Data & caveats:**
 
-**Interpretation notes:**
-
-- **Sharpe vs. the risk-free rate.** At a 6.5% Indian G-Sec Rf, Sharpe ratios look low versus US figures
-  quoted at 2%. That is an apples-to-oranges artifact — report the relative ranking and also show Sortino/Calmar.
-- **Costs are a flat bps assumption**, not a full micro-structure model (impact, bid-ask, STT/GST detail).
-- **Regimes and in-sample markers** on the frontier are illustrative; the honest performance numbers are on the Backtest tab.
+- Indian indices: official NSE, price-return; validated (Nifty50 Mar-2020 = −23.25%, matches published).
+- Equities are price-return; bonds/gold/cash are total-return (their natural form) — a documented, minor inconsistency.
+- Risk-free rate is a flat slider (the scoring hurdle for Sharpe and an input to MSR/BL/CPPI) — not a
+  time-varying series and not an asset in the pool.
+- Costs are flat bps on turnover; taxes (STT, STCG/LTCG) are not modelled — which favours buy-and-hold.
+- Regime labels and frontier markers are in-sample/illustrative; the honest numbers are on the Backtest tab.
         """
     )
     st.caption("Built on the EDHEC 'Investment Management with Python and Machine Learning' methodology, "
-               "applied to Indian NSE indices.")
+               "applied to Indian NSE indices and a multi-asset pool.")
