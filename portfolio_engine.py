@@ -476,7 +476,7 @@ STRATEGIES = {
     "Max Diversification (MDP)": weights_max_diversification,
     "Risk Parity (ERC)": weights_risk_parity,
     "Hierarchical Risk Parity (HRP)": weights_hrp,
-    "Black-Litterman (equilibrium)": weights_black_litterman,
+    "Black-Litterman (implied-return tilt)": weights_black_litterman,
 }
 
 
@@ -521,11 +521,11 @@ STRATEGY_INFO = {
         "cons": "Newer, less intuitive to explain; results depend on the clustering/linkage choice; still no return forecast.",
         "real_world": "The flagship 'ML for portfolio construction' technique — exactly the Course 3, Week 3 material, and increasingly used at quant funds.",
     },
-    "Black-Litterman (equilibrium)": {
-        "idea": "Reverse-engineer the expected returns implied by a sensible prior allocation, instead of trusting raw historical means. Here we run it with no active views, so it returns the robust equilibrium.",
-        "pros": "Fixes Max Sharpe's core weakness — replaces noisy historical means with stable, market-implied returns. Views can be blended in with confidence levels.",
-        "cons": "With no views it reduces to the prior (here, an equal-risk-ish equilibrium); the choice of prior and risk-aversion delta matters; full power only shows with well-formed views.",
-        "real_world": "Developed at Goldman Sachs; the industry-standard way institutional desks combine a market prior with analyst views.",
+    "Black-Litterman (implied-return tilt)": {
+        "idea": "Back out the returns implied by the covariance (higher-risk assets get higher implied returns), then run Max-Sharpe on them. This simplified version has no active views, so it behaves as an aggressive tilt toward the high-implied-return (high-volatility) assets.",
+        "pros": "Uses market-implied returns rather than raw historical means; captures the intuition behind Black-Litterman's first step (reverse optimization).",
+        "cons": "Because implied returns scale with risk, and we run a long-only Max-Sharpe on them, it concentrates in the high-volatility assets (equities) rather than staying balanced. Full Black-Litterman with proper views/confidence would spread across assets and tilt only toward a stated view — that's a planned enhancement, not what this does today.",
+        "real_world": "Reverse-optimization (Goldman Sachs' Black-Litterman step 1). The complete method blends this market prior with explicit analyst views and confidence levels.",
     },
 }
 

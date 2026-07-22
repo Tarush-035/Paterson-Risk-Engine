@@ -532,7 +532,7 @@ with tabs[7]:
 **Methodology (EDHEC courses):**
 
 - **Course 1** — return/risk stats, efficient frontier + CML, CPPI/TIPP insurance, ALM (funding ratio, duration matching).
-- **Course 2** — robust covariance (shrinkage, constant-correlation, EWMA), Black-Litterman equilibrium.
+- **Course 2** — robust covariance (shrinkage, constant-correlation, EWMA), Black-Litterman implied returns (reverse optimization).
 - **Course 3** — Hierarchical Risk Parity (ML clustering), regime analysis (Gaussian mixture).
 
 **Backtesting.** Walk-forward, strictly out-of-sample: weights use only data before month *t*, applied to
